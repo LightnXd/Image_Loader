@@ -1,50 +1,47 @@
-# Welcome to your Expo app 👋
+# ZIP Media Viewer 📦
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A React Native Expo app that allows you to view images and videos from ZIP files.
 
-## Get started
+## Features
 
-1. Install dependencies
+- 📦 Select and extract ZIP files
+- 🖼️ View images (JPG, PNG, GIF, WEBP)
+- 🎬 Play videos (MP4, MOV, AVI, MKV, WEBM)
+- 📱 Full-screen width media display
+- ⏯️ Auto-play/pause videos based on visibility
+- 🔄 Auto-adjusting media heights based on aspect ratio
 
-   ```bash
-   npm install
-   ```
+## How to Use
 
-2. Start the app
+1. Tap "Select ZIP File" on the home screen
+2. Choose a ZIP file containing images and/or videos
+3. Media files will be extracted and displayed vertically
+4. Scroll through your media
+5. Tap on videos to show/hide playback controls
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Installation
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Running the App
 
-## Learn more
+```bash
+npm start
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Or with custom script (Windows):
+```powershell
+.\start-metro.ps1
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Technologies
 
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- React Native
+- Expo SDK ~54
+- expo-document-picker - File selection
+- expo-file-system - File operations
+- expo-av - Video playback
+- expo-image - Optimized image rendering
+- JSZip - ZIP file extraction

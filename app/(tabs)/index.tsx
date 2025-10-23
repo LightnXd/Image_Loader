@@ -1,98 +1,167 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
-
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
+import { Directory, File, Paths } from 'expo-file-system';
+import { useRouter } from 'expo-router';
+import JSZip from 'jszip';
+import { useState } from 'react';
+import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const handleSelectFile = async () => {
+    try {
+      setLoading(true);
+      console.log('Starting file selection...');
+      
+      // Pick a zip file
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/zip',
+        copyToCacheDirectory: true,
+      });
+
+      console.log('DocumentPicker result:', result);
+
+      if (result.canceled) {
+        console.log('User canceled file selection');
+        setLoading(false);
+        return;
+      }
+
+      const file = result.assets[0];
+      console.log('Selected file:', file.uri, file.name);
+      
+      // Read the zip file as base64 using expo-file-system
+      console.log('Reading file as base64...');
+      const zipFile = new File(file.uri);
+      const base64Data = await zipFile.text(); // Read as text first
+      
+      // If that doesn't work, try reading as base64 directly
+      let zipData;
+      try {
+        zipData = await zipFile.arrayBuffer();
+        console.log('File read as ArrayBuffer, size:', zipData.byteLength);
+      } catch (err) {
+        console.log('ArrayBuffer failed, trying base64 method...');
+        const base64Content = await zipFile.text();
+        // Convert base64 to array buffer
+        const binaryString = atob(base64Content);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        zipData = bytes.buffer;
+        console.log('File converted from base64, size:', zipData.byteLength);
+      }
+      
+      // Load the zip file with JSZip
+      console.log('Loading zip...');
+      const zip = await JSZip.loadAsync(zipData);
+      console.log('Zip loaded, files:', Object.keys(zip.files).length);
+      
+      // Create a temp directory for extraction
+      const tempDir = new Directory(Paths.cache, `extracted_${Date.now()}`);
+      tempDir.create();
+      console.log('Temp directory created:', tempDir.uri);
+
+      // Extract all files
+      const mediaFiles: string[] = [];
+      const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mov', '.avi', '.mkv', '.webm'];
+
+      for (const [filename, zipEntry] of Object.entries(zip.files)) {
+        if (!zipEntry.dir) {
+          const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'));
+          
+          if (mediaExtensions.includes(ext)) {
+            console.log('Extracting media file:', filename);
+            // Get file content as base64
+            const content = await zipEntry.async('base64');
+            
+            // Save to filesystem
+            const savedFile = new File(tempDir, filename.replace(/\//g, '_'));
+            await savedFile.write(content, { encoding: 'base64' });
+            
+            mediaFiles.push(savedFile.uri);
+            console.log('Saved to:', savedFile.uri);
+          }
+        }
+      }
+
+      console.log('Total media files extracted:', mediaFiles.length);
+
+      if (mediaFiles.length === 0) {
+        Alert.alert('No Media Found', 'The zip file does not contain any images or videos.');
+        setLoading(false);
+        return;
+      }
+
+      // Navigate to viewer with media files
+      console.log('Navigating to viewer with', mediaFiles.length, 'files');
+      router.push({
+        pathname: '/viewer',
+        params: { 
+          files: JSON.stringify(mediaFiles),
+          zipName: file.name
+        }
+      });
+      
+      setLoading(false);
+    } catch (error: any) {
+      console.error('Error selecting file:', error);
+      console.error('Error stack:', error.stack);
+      Alert.alert('Error', `Failed to process the file: ${error.message}`);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <Text style={styles.title}>Home</Text>
+      
+      <TouchableOpacity 
+        style={[styles.button, loading && styles.buttonDisabled]} 
+        onPress={handleSelectFile}
+        disabled={loading}
+      >
+        <Text style={styles.buttonText}>
+          {loading ? 'Processing...' : 'Select ZIP File'}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
+  container: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    backgroundColor: '#fff',
+    padding: 20,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  title: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    marginBottom: 40,
+    color: '#333',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  button: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 40,
+    paddingVertical: 15,
+    borderRadius: 10,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
   },
 });
