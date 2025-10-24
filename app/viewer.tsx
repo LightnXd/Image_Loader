@@ -1,19 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ResizeMode, Video } from 'expo-av';
-import { Image as ExpoImage } from 'expo-image';
+import { Paths } from 'expo-file-system';
+// copyAsync is deprecated on the top-level API; import the legacy implementation to avoid deprecation warnings
+import { copyAsync } from 'expo-file-system/legacy';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated,
-  Dimensions,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
-  Image as RNImage,
-  Text as RNText,
-  ScrollView,
-  StyleSheet,
-  TouchableOpacity,
-  View,
+    Animated,
+    Dimensions,
+    NativeScrollEvent,
+    NativeSyntheticEvent,
+    Image as RNImage,
+    Text as RNText,
+    ScrollView,
+    StyleSheet,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -28,6 +30,7 @@ export default function ViewerScreen() {
   const videoRefs = useRef<{ [key: number]: Video | null }>({});
   const [itemLayouts, setItemLayouts] = useState<{ [key: number]: { y: number; height: number } }>({});
   const [mediaAspectRatios, setMediaAspectRatios] = useState<{ [key: number]: number }>({});
+  const [localUris, setLocalUris] = useState<{ [key: number]: string }>({});
   const measuredVideos = useRef<Set<number>>(new Set());
   const [showControlsForVideo, setShowControlsForVideo] = useState<number | null>(null);
 
@@ -45,31 +48,20 @@ export default function ViewerScreen() {
   };
 
   // Load dimensions for images only (videos will get dimensions on load)
+  // Initialize default aspect ratios (videos get a default until measured)
   useEffect(() => {
     files.forEach((file, index) => {
-      if (!isVideo(file)) {
-        // Get image dimensions
-        RNImage.getSize(
-          file,
-          (width, height) => {
-            setMediaAspectRatios(prev => ({
-              ...prev,
-              [index]: width / height
-            }));
-          },
-          (error) => {
-            console.error('Failed to get image size:', error);
-            setMediaAspectRatios(prev => ({
-              ...prev,
-              [index]: 1
-            }));
-          }
-        );
-      } else {
+      if (isVideo(file)) {
         // Default aspect ratio for videos until they load
         setMediaAspectRatios(prev => ({
           ...prev,
           [index]: 16 / 9
+        }));
+      } else {
+        // Default aspect ratio for images; will be corrected on image load
+        setMediaAspectRatios(prev => ({
+          ...prev,
+          [index]: 1
         }));
       }
     });
@@ -157,6 +149,7 @@ export default function ViewerScreen() {
 
   const renderMediaItem = (filePath: string, index: number) => {
     const aspectRatio = mediaAspectRatios[index] || 1;
+    const displayUri = localUris[index] ?? filePath;
     
     if (isVideo(filePath)) {
       return (
@@ -169,7 +162,7 @@ export default function ViewerScreen() {
         >
           <Video
             ref={(ref) => { videoRefs.current[index] = ref; }}
-            source={{ uri: filePath }}
+            source={{ uri: displayUri }}
             style={[styles.media, { aspectRatio }]}
             useNativeControls={showControlsForVideo === index}
             resizeMode={ResizeMode.CONTAIN}
@@ -192,6 +185,25 @@ export default function ViewerScreen() {
                 }
               }
             }}
+            onError={async (err) => {
+              try {
+                console.warn('Video failed to load directly, attempting to copy to cache:', filePath, err);
+                if (filePath && filePath.startsWith && filePath.startsWith('content://')) {
+                  const extMatch = filePath.match(/\.([a-zA-Z0-9]+)(?:$|\?)/);
+                  const ext = extMatch ? `.${extMatch[1]}` : '.mp4';
+                  const dest = `${Paths.cache}media_${index}_${Date.now()}${ext}`;
+                  try {
+                    await copyAsync({ from: filePath, to: dest });
+                    setLocalUris(prev => ({ ...prev, [index]: dest }));
+                    console.log('Copied content URI (video) to cache:', dest);
+                  } catch (copyErr) {
+                    console.warn('Failed to copy content URI (video) to cache:', copyErr);
+                  }
+                }
+              } catch (e) {
+                console.warn('Video onError fallback failed:', e);
+              }
+            }}
           />
         </TouchableOpacity>
       );
@@ -202,11 +214,42 @@ export default function ViewerScreen() {
           style={styles.mediaContainer}
           onLayout={(e) => handleLayout(index, e)}
         >
-          <ExpoImage
-            source={{ uri: filePath }}
+          <RNImage
+            source={{ uri: displayUri }}
             style={[styles.media, { aspectRatio }]}
-            contentFit="cover"
-            transition={200}
+            resizeMode="cover"
+            onLoad={(e) => {
+              try {
+                const { width, height } = (e.nativeEvent && (e.nativeEvent as any).source) || (e.nativeEvent && (e.nativeEvent as any).width && (e.nativeEvent as any).height ? { width: (e.nativeEvent as any).width, height: (e.nativeEvent as any).height } : {});
+                if (width && height) {
+                  setMediaAspectRatios(prev => ({ ...prev, [index]: width / height }));
+                }
+              } catch (err) {
+                // ignore - keep default aspect ratio
+                console.warn('onLoad failed to get image dimensions:', err);
+              }
+            }}
+            onError={async (err) => {
+              try {
+                console.warn('Image failed to load directly, attempting to copy to cache:', filePath, err.nativeEvent || err);
+                // If it's a content:// URI, try copying it to cache and use that copy
+                if (filePath && filePath.startsWith && filePath.startsWith('content://')) {
+                  const extMatch = filePath.match(/\.([a-zA-Z0-9]+)(?:$|\?)/);
+                  const ext = extMatch ? `.${extMatch[1]}` : '.jpg';
+                  const dest = `${Paths.cache}media_${index}_${Date.now()}${ext}`;
+                  try {
+                    // Attempt to copy the content URI to a cache file
+                    await copyAsync({ from: filePath, to: dest });
+                    setLocalUris(prev => ({ ...prev, [index]: dest }));
+                    console.log('Copied content URI to cache:', dest);
+                  } catch (copyErr) {
+                    console.warn('Failed to copy content URI to cache:', copyErr);
+                  }
+                }
+              } catch (e) {
+                console.warn('onError fallback failed:', e);
+              }
+            }}
           />
         </View>
       );
