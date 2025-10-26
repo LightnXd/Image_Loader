@@ -1,15 +1,36 @@
 import * as DocumentPicker from 'expo-document-picker';
-import { Directory, File, Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system';
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
-import { Alert, NativeModules, Platform, StyleSheet, Text, ToastAndroid, TouchableOpacity, View } from 'react-native';
+import { useRef, useState } from 'react';
+import { Alert, NativeModules, PanResponder, PanResponderInstance, Platform, StyleSheet, Switch, Text, ToastAndroid, TouchableOpacity, View } from 'react-native';
 import { unzip } from 'react-native-zip-archive';
 import DirectoryPickerNative from '../lib/directoryPicker';
 import { saveItem } from '../lib/storage';
+import { useAppTheme } from '../lib/theme';
 
 export default function HomeScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const { dark: darkMode, bg, fg, setDark } = useAppTheme();
+  const toggleTheme = (value: boolean) => setDark(!!value);
+  // Swipe to Saved: create a PanResponder to detect right swipes
+  const panRef = useRef<PanResponderInstance | null>(null);
+  if (!panRef.current) {
+    panRef.current = PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        const { dx, dy } = gestureState;
+        return Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy);
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        const { dx, vx } = gestureState;
+        // right swipe
+        if (dx > 80 && Math.abs(vx) > 0.15) {
+          router.push({ pathname: '/saved' });
+        }
+      }
+    });
+  }
   const MEDIA_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mov', '.avi', '.mkv', '.webm'];
 
   const handleSelectFile = async () => {
@@ -36,31 +57,20 @@ export default function HomeScreen() {
       
       // Use native unzip to extract the archive to cache to avoid loading the whole file into JS memory
       console.log('Unzipping file natively...');
-    const tempDirName = `extracted_${Date.now()}`;
-    const tempDir = new Directory(Paths.cache, tempDirName);
-    const tempDirPath = tempDir.uri; // file://...
+      const tempDirName = `extracted_${Date.now()}`;
+  const destPath = `${(FileSystem as any).cacheDirectory}${tempDirName}`;
 
-  // Ensure target directory exists by writing an empty file or using expo-file-system APIs if needed
-  // react-native-zip-archive will create the directory when unzipping
-  // Prepare source and destination paths for unzip.
       // DocumentPicker with copyToCacheDirectory=true should return a file:// URI pointing into the cache.
       let srcPathRaw = file.uri;
-      if (srcPathRaw.startsWith('file://')) {
-        srcPathRaw = srcPathRaw.replace('file://', '');
-      }
-      // Ensure destPath for unzip is a plain path (no file://)
-      let destPathRaw = tempDirPath;
-      if (destPathRaw.startsWith('file://')) {
-        destPathRaw = destPathRaw.replace('file://', '');
-      }
+      if (srcPathRaw.startsWith('file://')) srcPathRaw = srcPathRaw.replace('file://', '');
+      let destPathRaw = destPath;
+      if (destPathRaw.startsWith('file://')) destPathRaw = destPathRaw.replace('file://', '');
 
-      console.log('Unzip source:', srcPathRaw, 'dest:', destPathRaw);
-      // react-native-zip-archive is a native module and will be missing in Expo Go (NativeModules.RNZipArchive === undefined/null)
       if (!NativeModules || !NativeModules.RNZipArchive) {
         console.warn('react-native-zip-archive native module not available (likely running in Expo Go).');
         Alert.alert(
           'Native unzip not available',
-          'This feature requires a native module (react-native-zip-archive).\n\nTo process large ZIP files without running out of memory, run the app in a development build or a native build that includes this module (for example: `npx expo prebuild` then `npx expo run:android`, or build an Expo dev client).'
+          'This feature requires a native module (react-native-zip-archive).\n\nTo process large ZIP files without running out of memory, run the app in a development build or a native build that includes this module.'
         );
         setLoading(false);
         return;
@@ -76,33 +86,30 @@ export default function HomeScreen() {
         return;
       }
 
-      // Scan the extracted directory for media files
+      // Recursively collect media files from the extracted directory
       const mediaFiles: string[] = [];
-      const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mov', '.avi', '.mkv', '.webm'];
-
-      // Use expo-file-system Directory and File helpers to read extracted files
-      const extractedDir = new Directory(Paths.cache, tempDirName);
-      // Read extracted directory contents using Directory.list()
-      try {
-        // Directory.list() is async; make sure to await it
-        const entries = await extractedDir.list();
-        if (Array.isArray(entries)) {
-          for (const entry of entries) {
-            if (entry instanceof File) {
-              const name = entry.name;
-              const ext = name.toLowerCase().substring(name.lastIndexOf('.'));
-              if (mediaExtensions.includes(ext)) {
-                mediaFiles.push(entry.uri);
-                console.log('Found media file:', entry.uri);
+      async function collectFiles(dir: string) {
+        try {
+          const entries = await FileSystem.readDirectoryAsync(dir);
+          for (const name of entries) {
+            const full = `${dir}${name}`;
+            const info = await FileSystem.getInfoAsync(full);
+            if (info.isDirectory) {
+              await collectFiles(full + '/');
+            } else {
+              const lower = name.toLowerCase();
+              if (MEDIA_EXTENSIONS.some(ext => lower.endsWith(ext))) {
+                // ensure we return a file:// URI for the viewer
+                mediaFiles.push(full.startsWith('file://') ? full : `file://${full}`);
               }
             }
           }
-        } else {
-          console.warn('Extracted directory.list() returned unexpected value:', entries);
+        } catch (err) {
+          console.error('Failed to read extracted directory:', err);
         }
-      } catch (dirErr) {
-        console.error('Failed to read extracted directory:', dirErr);
       }
+
+      await collectFiles(destPathRaw + '/');
 
       console.log('Total media files extracted:', mediaFiles.length);
 
@@ -126,12 +133,12 @@ export default function HomeScreen() {
       console.log('Navigating to viewer with', mediaFiles.length, 'files');
       router.push({
         pathname: '/viewer',
-        params: { 
+        params: {
           files: JSON.stringify(mediaFiles),
-          zipName: file.name
-        }
+          zipName: file.name,
+        },
       });
-      
+
       setLoading(false);
     } catch (error: any) {
       console.error('Error selecting file:', error);
@@ -182,16 +189,22 @@ export default function HomeScreen() {
     }
   };
 
+  // theme is provided by AppThemeProvider (useAppTheme)
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Home</Text>
-      
+    <View {...(panRef.current ? panRef.current.panHandlers : {})} style={[styles.container, { backgroundColor: bg }]}> 
+      <Text style={[styles.title, { color: fg }]}>Image Loader</Text>
+      <View style={styles.themeRow}>
+        <Text style={{ color: fg, marginRight: 8 }}>{darkMode ? 'Dark' : 'Light'}</Text>
+        <Switch value={darkMode} onValueChange={toggleTheme} />
+      </View>
+
       <TouchableOpacity 
         style={[styles.button, loading && styles.buttonDisabled]} 
         onPress={handleSelectFile}
         disabled={loading}
       >
-        <Text style={styles.buttonText}>
+        <Text style={[styles.buttonText, { color: fg }]}>
           {loading ? 'Processing...' : 'Select ZIP File'}
         </Text>
       </TouchableOpacity>
@@ -201,8 +214,8 @@ export default function HomeScreen() {
         onPress={handleNativeFolderAccess}
         disabled={loading}
       >
-        <Text style={styles.buttonText}>
-          {loading ? 'Processing...' : 'Grant Folder Access (native)'}
+        <Text style={[styles.buttonText, { color: fg }]}> 
+          {loading ? 'Processing...' : 'Select Folder'}
         </Text>
       </TouchableOpacity>
     </View>
@@ -245,4 +258,5 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
   },
+  themeRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
 });

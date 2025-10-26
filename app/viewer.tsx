@@ -2,21 +2,25 @@ import { Ionicons } from '@expo/vector-icons';
 import { ResizeMode, Video } from 'expo-av';
 import { Paths } from 'expo-file-system';
 // copyAsync is deprecated on the top-level API; import the legacy implementation to avoid deprecation warnings
+import * as FileSystem from 'expo-file-system';
 import { copyAsync } from 'expo-file-system/legacy';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    NativeScrollEvent,
-    NativeSyntheticEvent,
-    Image as RNImage,
-    Text as RNText,
-    ScrollView,
-    StyleSheet,
-    TouchableOpacity,
-    View,
+  Animated,
+  Dimensions,
+  Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  Pressable,
+  Image as RNImage,
+  Text as RNText,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  View,
 } from 'react-native';
+import { useAppTheme } from './lib/theme';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -33,6 +37,11 @@ export default function ViewerScreen() {
   const [localUris, setLocalUris] = useState<{ [key: number]: string }>({});
   const measuredVideos = useRef<Set<number>>(new Set());
   const [showControlsForVideo, setShowControlsForVideo] = useState<number | null>(null);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [sortBy, setSortBy] = useState<'name'|'modified'|'type'|'random'>('name');
+  const [sortAsc, setSortAsc] = useState(true);
+  const [sortedFiles, setSortedFiles] = useState<string[]>([]);
+  const { dark: darkMode, bg, fg } = useAppTheme();
 
   // Parse file paths from params (memoized to prevent re-parsing)
   const files: string[] = useMemo(() => 
@@ -65,7 +74,70 @@ export default function ViewerScreen() {
         }));
       }
     });
+    // initialize sortedFiles
+    setSortedFiles(files.slice());
   }, [files]);
+
+  // Re-sort whenever sort settings change
+  useEffect(() => {
+    const doSort = async () => {
+      if (!files || files.length === 0) {
+        setSortedFiles([]);
+        return;
+      }
+      let arr = files.slice();
+      if (sortBy === 'random') {
+        // simple Fisher-Yates shuffle
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+      } else if (sortBy === 'name') {
+        arr.sort((a, b) => {
+          const na = a.substring(a.lastIndexOf('/') + 1).toLowerCase();
+          const nb = b.substring(b.lastIndexOf('/') + 1).toLowerCase();
+          return na.localeCompare(nb) * (sortAsc ? 1 : -1);
+        });
+      } else if (sortBy === 'type') {
+        arr.sort((a, b) => {
+          const ta = isVideo(a) ? '2' : '1';
+          const tb = isVideo(b) ? '2' : '1';
+          if (ta === tb) {
+            const na = a.substring(a.lastIndexOf('/') + 1).toLowerCase();
+            const nb = b.substring(b.lastIndexOf('/') + 1).toLowerCase();
+            return na.localeCompare(nb) * (sortAsc ? 1 : -1);
+          }
+          return (ta < tb ? -1 : 1) * (sortAsc ? 1 : -1);
+        });
+      } else if (sortBy === 'modified') {
+        // Attempt to fetch modification times; fallback to name sort if unavailable
+        try {
+          const infos = await Promise.all(arr.map(async (uri) => {
+            try {
+            const info = await FileSystem.getInfoAsync(uri);
+              // expo FileSystem may expose modificationTime or modificationTimeMillis - try common fields
+              const m = (info as any).modificationTime || (info as any).modificationTimeMillis || (info as any).mtime || 0;
+              return { uri, m: m || 0 };
+            } catch (e) {
+              return { uri, m: 0 };
+            }
+          }));
+          infos.sort((a, b) => (a.m - b.m) * (sortAsc ? 1 : -1));
+          arr = infos.map(i => i.uri);
+        } catch (e) {
+          // fallback to name
+          arr.sort((a, b) => {
+            const na = a.substring(a.lastIndexOf('/') + 1).toLowerCase();
+            const nb = b.substring(b.lastIndexOf('/') + 1).toLowerCase();
+            return na.localeCompare(nb) * (sortAsc ? 1 : -1);
+          });
+        }
+      }
+
+      setSortedFiles(arr);
+    };
+    doSort();
+  }, [sortBy, sortAsc, params.files]);
 
   const handleVideoReadyForDisplay = (index: number, event: any) => {
     if (measuredVideos.current.has(index)) return;
@@ -257,7 +329,7 @@ export default function ViewerScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: bg }]}> 
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.contentContainer}
@@ -265,7 +337,7 @@ export default function ViewerScreen() {
         onScroll={handleScroll}
         scrollEventThrottle={16}
       >
-        {files.map((file, index) => renderMediaItem(file, index))}
+        {sortedFiles.map((file, index) => renderMediaItem(file, index))}
       </ScrollView>
 
       {/* Collapsible Header */}
@@ -293,9 +365,37 @@ export default function ViewerScreen() {
           <RNText style={styles.headerTitle} numberOfLines={1} ellipsizeMode="middle">
             {zipName}
           </RNText>
-          <View style={styles.placeholder} />
+          <TouchableOpacity style={styles.orderButton} onPress={() => setMenuVisible(true)}>
+            <RNImage source={require('../assets/images/order.png')} style={{ width: 20, height: 20, tintColor: '#fff' }} />
+          </TouchableOpacity>
         </View>
       </Animated.View>
+
+      {/* Sort menu modal */}
+      <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setMenuVisible(false)}>
+          <View style={[styles.menuBox, { backgroundColor: bg }]}> 
+            {(['name','modified','type','random'] as Array<'name'|'modified'|'type'|'random'>).map((opt) => (
+              <Pressable key={opt} style={styles.menuRow} onPress={() => {
+                // 'random' has no asc/desc and should not show an arrow
+                if (opt === 'random') {
+                  setSortBy('random');
+                } else if (sortBy === opt) {
+                  setSortAsc(prev => !prev);
+                } else {
+                  setSortBy(opt);
+                }
+                setMenuVisible(false);
+              }}>
+                <RNText style={[styles.menuText, { color: fg }]}>{opt === 'modified' ? 'Modified date' : opt.charAt(0).toUpperCase() + opt.slice(1)}</RNText>
+                <View style={styles.menuArrow}>{(sortBy === opt && opt !== 'random') ? (
+                  <RNText style={{ color: darkMode ? fg : '#666' }}>{sortAsc ? '↑' : '↓'}</RNText>
+                ) : null}</View>
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -310,7 +410,9 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     alignItems: 'center',
-    paddingVertical: 0,
+    paddingTop: 75,
+    paddingBottom: 50,
+    backgroundColor: '#000',
   },
   mediaContainer: {
     width: SCREEN_WIDTH,
@@ -356,4 +458,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  orderButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    color: '#fff',
+  },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', justifyContent: 'flex-start', alignItems: 'flex-end' },
+  menuBox: { width: 220, marginTop: 90, marginRight: 10, backgroundColor: '#fff', borderRadius: 8, paddingVertical: 6, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, elevation: 6 },
+  menuRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10 },
+  menuText: { fontSize: 14, color: '#222' },
+  menuArrow: { width: 24, alignItems: 'flex-end' },
 });

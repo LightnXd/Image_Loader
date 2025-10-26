@@ -93,3 +93,15 @@ export async function removeItem(id: string) {
     throw e;
   }
 }
+
+export async function updateItemName(id: string, newName: string) {
+  try {
+    const list = await getSavedItems();
+    const next = list.map(i => i.id === id ? { ...i, name: newName } : i);
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    return next.find(i => i.id === id) ?? null;
+  } catch (e) {
+    console.warn('updateItemName error', e);
+    throw e;
+  }
+}
