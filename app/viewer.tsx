@@ -1,26 +1,26 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ResizeMode, Video } from 'expo-av';
 import { Paths } from 'expo-file-system';
-// copyAsync is deprecated on the top-level API; import the legacy implementation to avoid deprecation warnings
-import * as FileSystem from 'expo-file-system';
-import { copyAsync } from 'expo-file-system/legacy';
+// Use legacy API to avoid deprecation warnings
+import * as FileSystem from 'expo-file-system/legacy';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Dimensions,
+  FlatList,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Pressable,
   Image as RNImage,
   Text as RNText,
-  ScrollView,
   StyleSheet,
   TouchableOpacity,
   View,
+  ViewToken,
 } from 'react-native';
-import { useAppTheme } from './lib/theme';
+import { useAppTheme } from '../lib/theme';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -36,7 +36,8 @@ export default function ViewerScreen() {
   const [mediaAspectRatios, setMediaAspectRatios] = useState<{ [key: number]: number }>({});
   const [localUris, setLocalUris] = useState<{ [key: number]: string }>({});
   const measuredVideos = useRef<Set<number>>(new Set());
-  const [showControlsForVideo, setShowControlsForVideo] = useState<number | null>(null);
+  const visibleVideoIndices = useRef<Set<number>>(new Set());
+  const sortedFilesRef = useRef<string[]>([]);
   const [menuVisible, setMenuVisible] = useState(false);
   const [sortBy, setSortBy] = useState<'name'|'modified'|'type'|'random'>('name');
   const [sortAsc, setSortAsc] = useState(true);
@@ -50,7 +51,8 @@ export default function ViewerScreen() {
   );
   const zipName: string = params.zipName as string || 'Viewer';
 
-  const isVideo = (filePath: string): boolean => {
+  const isVideo = (filePath: string | undefined): boolean => {
+    if (!filePath) return false;
     const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
     const ext = filePath.toLowerCase().substring(filePath.lastIndexOf('.'));
     return videoExtensions.includes(ext);
@@ -78,6 +80,11 @@ export default function ViewerScreen() {
     setSortedFiles(files.slice());
   }, [files]);
 
+  // Keep ref in sync with sortedFiles state
+  useEffect(() => {
+    sortedFilesRef.current = sortedFiles;
+  }, [sortedFiles]);
+
   // Re-sort whenever sort settings change
   useEffect(() => {
     const doSort = async () => {
@@ -94,12 +101,14 @@ export default function ViewerScreen() {
         }
       } else if (sortBy === 'name') {
         arr.sort((a, b) => {
+          if (!a || !b) return 0;
           const na = a.substring(a.lastIndexOf('/') + 1).toLowerCase();
           const nb = b.substring(b.lastIndexOf('/') + 1).toLowerCase();
           return na.localeCompare(nb) * (sortAsc ? 1 : -1);
         });
       } else if (sortBy === 'type') {
         arr.sort((a, b) => {
+          if (!a || !b) return 0;
           const ta = isVideo(a) ? '2' : '1';
           const tb = isVideo(b) ? '2' : '1';
           if (ta === tb) {
@@ -127,6 +136,7 @@ export default function ViewerScreen() {
         } catch (e) {
           // fallback to name
           arr.sort((a, b) => {
+            if (!a || !b) return 0;
             const na = a.substring(a.lastIndexOf('/') + 1).toLowerCase();
             const nb = b.substring(b.lastIndexOf('/') + 1).toLowerCase();
             return na.localeCompare(nb) * (sortAsc ? 1 : -1);
@@ -156,34 +166,62 @@ export default function ViewerScreen() {
         }));
       }
     }
+    
+    // Auto-play video ONLY if it's currently visible
+    const videoRef = videoRefs.current[index];
+    if (videoRef && visibleVideoIndices.current.has(index)) {
+      console.log(`Auto-playing video ${index} after ready (is visible)`);
+      videoRef.playAsync().catch((err) => {
+        console.warn(`Failed to auto-play video ${index} on ready:`, err);
+      });
+    }
   };
 
-  const checkVisibility = useCallback((scrollPosition: number) => {
-    Object.entries(itemLayouts).forEach(([index, layout]) => {
-      const itemTop = layout.y;
-      const itemBottom = layout.y + layout.height;
-      const viewTop = scrollPosition;
-      const viewBottom = scrollPosition + SCREEN_HEIGHT;
+  // Handle viewable items changed for FlatList (better than scroll-based visibility)
+  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
+    const visibleIndices = new Set(
+      viewableItems
+        .map(item => item.index)
+        .filter((index): index is number => index !== null && index !== undefined)
+    );
 
-      const isVisible = itemBottom > viewTop && itemTop < viewBottom;
-      const videoRef = videoRefs.current[parseInt(index)];
+    // Update the ref so handleVideoReadyForDisplay knows which videos are visible
+    visibleVideoIndices.current = visibleIndices;
 
+    console.log('Viewable items changed. Visible indices:', Array.from(visibleIndices));
+
+    // Play videos that are visible, pause those that aren't
+    Object.keys(videoRefs.current).forEach(key => {
+      const index = parseInt(key);
+      const videoRef = videoRefs.current[index];
       if (videoRef) {
-        if (isVisible) {
-          videoRef.playAsync();
+        const isVisible = visibleIndices.has(index);
+        const isVideoFile = isVideo(sortedFilesRef.current[index]);
+        console.log(`Index ${index}: visible=${isVisible}, isVideo=${isVideoFile}, file=${sortedFilesRef.current[index]?.substring(sortedFilesRef.current[index]?.lastIndexOf('/') + 1)}`);
+        
+        if (isVisible && isVideoFile) {
+          console.log(`Playing video at index ${index}`);
+          videoRef.playAsync().catch((err) => {
+            console.warn(`Failed to play video ${index}:`, err);
+          });
         } else {
-          videoRef.pauseAsync();
+          console.log(`Pausing video at index ${index} (visible=${isVisible}, isVideo=${isVideoFile})`);
+          videoRef.pauseAsync().catch(() => {});
         }
       }
     });
-  }, [itemLayouts]);
+  }).current;
+
+  const viewabilityConfig = useRef({
+    itemVisiblePercentThreshold: 10, // Item is considered visible when 10% is on screen
+    minimumViewTime: 100, // Minimum time (ms) item must be visible before callback fires
+  }).current;
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const currentScrollY = event.nativeEvent.contentOffset.y;
     const scrollDelta = currentScrollY - lastScrollY.current;
 
-    // Check video visibility
-    checkVisibility(currentScrollY);
+    // Video visibility is now handled by onViewableItemsChanged (more efficient with FlatList)
 
     // Scroll up (pull down gesture) - show header
     if (scrollDelta < -5 && !headerVisible) {
@@ -215,11 +253,29 @@ export default function ViewerScreen() {
     }));
   };
 
-  const handleVideoDoubleTap = (index: number) => {
-    setShowControlsForVideo(showControlsForVideo === index ? null : index);
+  const handleVideoDoubleTap = async (index: number) => {
+    const videoRef = videoRefs.current[index];
+    if (videoRef) {
+      try {
+        const status = await videoRef.getStatusAsync();
+        if (status.isLoaded) {
+          if (status.isPlaying) {
+            await videoRef.pauseAsync();
+          } else {
+            await videoRef.playAsync();
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to toggle video playback:', err);
+      }
+    }
   };
 
   const renderMediaItem = (filePath: string, index: number) => {
+    if (!filePath) {
+      return <View key={index} style={styles.mediaContainer} />;
+    }
+    
     const aspectRatio = mediaAspectRatios[index] || 1;
     const displayUri = localUris[index] ?? filePath;
     
@@ -236,7 +292,7 @@ export default function ViewerScreen() {
             ref={(ref) => { videoRefs.current[index] = ref; }}
             source={{ uri: displayUri }}
             style={[styles.media, { aspectRatio }]}
-            useNativeControls={showControlsForVideo === index}
+            useNativeControls={false}
             resizeMode={ResizeMode.CONTAIN}
             shouldPlay={false}
             isLooping
@@ -265,7 +321,7 @@ export default function ViewerScreen() {
                   const ext = extMatch ? `.${extMatch[1]}` : '.mp4';
                   const dest = `${Paths.cache}media_${index}_${Date.now()}${ext}`;
                   try {
-                    await copyAsync({ from: filePath, to: dest });
+                    await FileSystem.copyAsync({ from: filePath, to: dest });
                     setLocalUris(prev => ({ ...prev, [index]: dest }));
                     console.log('Copied content URI (video) to cache:', dest);
                   } catch (copyErr) {
@@ -311,7 +367,7 @@ export default function ViewerScreen() {
                   const dest = `${Paths.cache}media_${index}_${Date.now()}${ext}`;
                   try {
                     // Attempt to copy the content URI to a cache file
-                    await copyAsync({ from: filePath, to: dest });
+                    await FileSystem.copyAsync({ from: filePath, to: dest });
                     setLocalUris(prev => ({ ...prev, [index]: dest }));
                     console.log('Copied content URI to cache:', dest);
                   } catch (copyErr) {
@@ -330,15 +386,23 @@ export default function ViewerScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: bg }]}> 
-      <ScrollView
+      <FlatList
+        data={sortedFiles}
+        keyExtractor={(item, index) => `${item}-${index}`}
+        renderItem={({ item, index }) => renderMediaItem(item, index)}
         style={styles.scrollView}
         contentContainerStyle={styles.contentContainer}
         showsVerticalScrollIndicator={false}
         onScroll={handleScroll}
         scrollEventThrottle={16}
-      >
-        {sortedFiles.map((file, index) => renderMediaItem(file, index))}
-      </ScrollView>
+        windowSize={5}
+        maxToRenderPerBatch={3}
+        initialNumToRender={5}
+        removeClippedSubviews={false}
+        updateCellsBatchingPeriod={100}
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={viewabilityConfig}
+      />
 
       {/* Collapsible Header */}
       <Animated.View
@@ -375,24 +439,29 @@ export default function ViewerScreen() {
       <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setMenuVisible(false)}>
           <View style={[styles.menuBox, { backgroundColor: bg }]}> 
-            {(['name','modified','type','random'] as Array<'name'|'modified'|'type'|'random'>).map((opt) => (
-              <Pressable key={opt} style={styles.menuRow} onPress={() => {
-                // 'random' has no asc/desc and should not show an arrow
-                if (opt === 'random') {
-                  setSortBy('random');
-                } else if (sortBy === opt) {
-                  setSortAsc(prev => !prev);
-                } else {
-                  setSortBy(opt);
-                }
-                setMenuVisible(false);
-              }}>
-                <RNText style={[styles.menuText, { color: fg }]}>{opt === 'modified' ? 'Modified date' : opt.charAt(0).toUpperCase() + opt.slice(1)}</RNText>
-                <View style={styles.menuArrow}>{(sortBy === opt && opt !== 'random') ? (
-                  <RNText style={{ color: darkMode ? fg : '#666' }}>{sortAsc ? '↑' : '↓'}</RNText>
-                ) : null}</View>
-              </Pressable>
-            ))}
+            {(['name','modified','type','random'] as Array<'name'|'modified'|'type'|'random'>).map((opt) => {
+              const isSelected = sortBy === opt;
+              return (
+                <Pressable key={opt} style={styles.menuRow} onPress={() => {
+                  // 'random' has no asc/desc and should not show an arrow
+                  if (opt === 'random') {
+                    setSortBy('random');
+                  } else if (sortBy === opt) {
+                    setSortAsc(prev => !prev);
+                  } else {
+                    setSortBy(opt);
+                  }
+                  setMenuVisible(false);
+                }}>
+                  <RNText style={[styles.menuText, { color: isSelected ? '#007AFF' : fg }]}>
+                    {opt === 'modified' ? 'Modified date' : opt.charAt(0).toUpperCase() + opt.slice(1)}
+                  </RNText>
+                  <View style={styles.menuArrow}>{(isSelected && opt !== 'random') ? (
+                    <RNText style={{ color: '#007AFF', fontSize: 16, fontWeight: '600' }}>{sortAsc ? '↑' : '↓'}</RNText>
+                  ) : null}</View>
+                </Pressable>
+              );
+            })}
           </View>
         </Pressable>
       </Modal>

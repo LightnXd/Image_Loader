@@ -1,12 +1,12 @@
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
-import { Alert, NativeModules, PanResponder, PanResponderInstance, Platform, StyleSheet, Switch, Text, ToastAndroid, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, NativeModules, PanResponder, PanResponderInstance, Platform, StyleSheet, Switch, Text, ToastAndroid, TouchableOpacity, View } from 'react-native';
 import { unzip } from 'react-native-zip-archive';
+import { saveItem } from '../../lib/storage';
+import { useAppTheme } from '../../lib/theme';
 import DirectoryPickerNative from '../lib/directoryPicker';
-import { saveItem } from '../lib/storage';
-import { useAppTheme } from '../lib/theme';
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -58,15 +58,42 @@ export default function HomeScreen() {
       // Use native unzip to extract the archive to cache to avoid loading the whole file into JS memory
       console.log('Unzipping file natively...');
       const tempDirName = `extracted_${Date.now()}`;
-  const destPath = `${(FileSystem as any).cacheDirectory}${tempDirName}`;
+      // Resolve a reliable cache directory. On some environments FileSystem.cacheDirectory
+      // may be undefined (warnings about legacy API); fall back to documentDirectory or a sensible path.
+      let baseCache: string | null = (FileSystem as any).cacheDirectory ?? (FileSystem as any).documentDirectory ?? null;
+      if (!baseCache) {
+        // Fallback for Android app internal cache when expo API is not exposing cacheDirectory
+        baseCache = '/data/user/0/com.anonymous.image_loader/cache/';
+      }
+      // Ensure trailing slash
+      if (!baseCache.endsWith('/')) baseCache = baseCache + '/';
+      const destPath = `${baseCache}${tempDirName}`;
 
-      // DocumentPicker with copyToCacheDirectory=true should return a file:// URI pointing into the cache.
+  // DocumentPicker may return content:// URIs on Android or file:// URIs.
+      // If we receive a content:// URI, copy it to cache first so native unzip can access a real file path.
       let srcPathRaw = file.uri;
+      if (srcPathRaw && srcPathRaw.startsWith('content://')) {
+        try {
+          const tmpName = `upload_${Date.now()}_${file.name.replace(/[^a-z0-9_.-]/gi, '_')}`;
+          const tmpDest = `${(FileSystem as any).cacheDirectory}${tmpName}`;
+          console.log('Copying content:// URI to cache before unzip:', srcPathRaw, '->', tmpDest);
+          await FileSystem.copyAsync({ from: srcPathRaw, to: tmpDest });
+          srcPathRaw = tmpDest.startsWith('file://') ? tmpDest.replace('file://', '') : tmpDest;
+        } catch (copyErr) {
+          console.error('Failed to copy content URI to cache before unzip:', copyErr);
+          Alert.alert('File access failed', 'Unable to prepare selected file for extraction.');
+          setLoading(false);
+          return;
+        }
+      }
       if (srcPathRaw.startsWith('file://')) srcPathRaw = srcPathRaw.replace('file://', '');
       let destPathRaw = destPath;
       if (destPathRaw.startsWith('file://')) destPathRaw = destPathRaw.replace('file://', '');
 
-      if (!NativeModules || !NativeModules.RNZipArchive) {
+  // Log presence of the native module to help debug when running in Expo Go vs a dev client / native build
+  console.log('NativeModules.RNZipArchive presence:', !!(NativeModules && (NativeModules as any).RNZipArchive));
+
+  if (!NativeModules || !NativeModules.RNZipArchive) {
         console.warn('react-native-zip-archive native module not available (likely running in Expo Go).');
         Alert.alert(
           'Native unzip not available',
@@ -77,30 +104,79 @@ export default function HomeScreen() {
       }
 
       try {
-        await unzip(srcPathRaw, destPathRaw);
-        console.log('Unzip complete to:', destPathRaw);
+        console.log('About to make dest dir and unzip. srcPathRaw:', srcPathRaw, ' destPathRaw:', destPathRaw);
+        try {
+          // Ensure we call expo FileSystem with a file:// URI (its APIs expect file:// URIs).
+          const destUri = destPath.startsWith('file://') ? destPath : `file://${destPath}`;
+          const srcUri = srcPathRaw.startsWith('file://') ? srcPathRaw : `file://${srcPathRaw}`;
+          try {
+            const srcInfo = await FileSystem.getInfoAsync(srcUri).catch(() => null);
+            const beforeDestInfo = await FileSystem.getInfoAsync(destUri).catch(() => null);
+            console.log('Pre-unzip file info src:', srcUri, srcInfo, ' dest:', destUri, beforeDestInfo);
+          } catch (infoErr) {
+            console.warn('Failed to get pre-unzip FileSystem info:', infoErr);
+          }
+          // ensure destination exists (some native unzip implementations expect the directory to exist)
+          await FileSystem.makeDirectoryAsync(destUri, { intermediates: true }).catch((e) => {
+            console.warn('makeDirectoryAsync returned error (ignored):', e);
+          });
+          // Probe write to ensure we can create files in the destination
+          try {
+            const probePath = destUri.endsWith('/') ? `${destUri}.probe` : `${destUri}/.probe`;
+            await FileSystem.writeAsStringAsync(probePath, 'probe').catch(e => { throw e; });
+            // remove probe
+            await FileSystem.deleteAsync(probePath).catch(() => {});
+            console.log('Probe write succeeded at', probePath);
+          } catch (probeErr) {
+            console.warn('Probe write failed for destUri:', destUri, probeErr);
+          }
+          try {
+            const afterDestInfo = await FileSystem.getInfoAsync(destUri).catch(() => null);
+            console.log('Post-mkdir dest info:', destUri, afterDestInfo);
+          } catch (infoErr) {}
+        } catch (mkErr) {
+          console.warn('Failed to make dest dir (continuing):', mkErr);
+        }
+        try {
+          await unzip(srcPathRaw, destPathRaw);
+          console.log('Unzip complete to:', destPathRaw);
+        } catch (innerUnzipErr) {
+          console.error('Unzip threw (inner):', innerUnzipErr);
+          throw innerUnzipErr;
+        }
       } catch (unzipErr) {
-        console.error('Unzip failed:', unzipErr);
-        Alert.alert('Unzip failed', `${unzipErr}`);
+        console.error('Unzip failed (outer):', unzipErr);
+        // Try to surface as much detail as possible in the alert/logs
+        try {
+          const msg = typeof unzipErr === 'string' ? unzipErr : (unzipErr && (unzipErr as any).toString ? (unzipErr as any).toString() : JSON.stringify(unzipErr));
+          Alert.alert('Unzip failed', msg);
+        } catch (a) {}
         setLoading(false);
         return;
       }
 
       // Recursively collect media files from the extracted directory
       const mediaFiles: string[] = [];
-      async function collectFiles(dir: string) {
+
+      // Ensure the path provided to expo-file-system has a file:// scheme
+      const toFileUri = (p: string) => p.startsWith('file://') ? p : `file://${p}`;
+
+      async function collectFiles(dirUri: string) {
         try {
-          const entries = await FileSystem.readDirectoryAsync(dir);
+          // normalize directory URI
+          const normalizedDir = dirUri.endsWith('/') ? dirUri : `${dirUri}/`;
+          const entries = await FileSystem.readDirectoryAsync(normalizedDir);
           for (const name of entries) {
-            const full = `${dir}${name}`;
-            const info = await FileSystem.getInfoAsync(full);
-            if (info.isDirectory) {
-              await collectFiles(full + '/');
+            const fullPath = `${normalizedDir}${name}`;
+            const fullUri = toFileUri(fullPath);
+            const info = await FileSystem.getInfoAsync(fullUri).catch(() => null);
+            if (info && info.isDirectory) {
+              await collectFiles(fullUri + '/');
             } else {
               const lower = name.toLowerCase();
               if (MEDIA_EXTENSIONS.some(ext => lower.endsWith(ext))) {
-                // ensure we return a file:// URI for the viewer
-                mediaFiles.push(full.startsWith('file://') ? full : `file://${full}`);
+                // already a file:// URI
+                mediaFiles.push(fullUri);
               }
             }
           }
@@ -109,7 +185,8 @@ export default function HomeScreen() {
         }
       }
 
-      await collectFiles(destPathRaw + '/');
+      const destUriForRead = toFileUri(destPathRaw.endsWith('/') ? destPathRaw : `${destPathRaw}/`);
+      await collectFiles(destUriForRead);
 
       console.log('Total media files extracted:', mediaFiles.length);
 
@@ -218,6 +295,16 @@ export default function HomeScreen() {
           {loading ? 'Processing...' : 'Select Folder'}
         </Text>
       </TouchableOpacity>
+
+      {/* Loading Overlay */}
+      {loading && (
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingBox}>
+            <ActivityIndicator size="large" color="#007AFF" />
+            <Text style={styles.loadingText}>Processing...</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -259,4 +346,32 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   themeRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  loadingBox: {
+    backgroundColor: '#fff',
+    padding: 30,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: '#333',
+    fontWeight: '600',
+  },
 });

@@ -1,9 +1,9 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Dimensions, FlatList, Image, Modal, PanResponder, PanResponderInstance, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { getSavedItems, removeItem, SavedItem, updateItemName } from '../lib/storage';
-import { useAppTheme } from '../lib/theme';
+import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, PanResponder, PanResponderInstance, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { getSavedItems, removeItem, SavedItem, updateItemName } from '../../lib/storage';
+import { useAppTheme } from '../../lib/theme';
 
 const PLACEHOLDER = require('../../assets/images/folder.png');
 
@@ -11,6 +11,7 @@ const PLACEHOLDER = require('../../assets/images/folder.png');
 export default function SavedScreen() {
   const router = useRouter();
   const [items, setItems] = useState<SavedItem[]>([]);
+  const [loading, setLoading] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [renameText, setRenameText] = useState('');
@@ -60,8 +61,14 @@ export default function SavedScreen() {
       toggleSelect(item.id);
       return;
     }
+    // Show loading overlay while navigating
+    setLoading(true);
     // Navigate to viewer using saved files (they should be cache file:// URIs)
-    router.push({ pathname: '/viewer', params: { files: JSON.stringify(item.files), zipName: item.name } });
+    setTimeout(() => {
+      router.push({ pathname: '/viewer', params: { files: JSON.stringify(item.files), zipName: item.name } });
+      // Reset loading after navigation (note: this won't show if navigation is instant, but prevents stuck state)
+      setTimeout(() => setLoading(false), 500);
+    }, 100);
   };
 
   const toggleSelect = (id: string) => {
@@ -165,6 +172,16 @@ export default function SavedScreen() {
         columnWrapperStyle={styles.row}
         ListEmptyComponent={<Text style={styles.empty}>No saved items yet.</Text>}
       />
+
+      {/* Loading Overlay */}
+      {loading && (
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingBox}>
+            <ActivityIndicator size="large" color="#007AFF" />
+            <Text style={styles.loadingText}>Loading...</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -218,4 +235,32 @@ const styles = StyleSheet.create({
   modalButtons: { flexDirection: 'row', justifyContent: 'flex-end' },
   modalButton: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6, backgroundColor: '#eee' },
   empty: { textAlign: 'center', marginTop: 40, color: '#666' },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  loadingBox: {
+    backgroundColor: '#fff',
+    padding: 30,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: '#333',
+    fontWeight: '600',
+  },
 });
